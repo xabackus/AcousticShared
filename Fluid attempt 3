@@ -1,0 +1,275 @@
+import numpy as np
+import pygame
+import sys
+
+# Constants and Initialization
+PI = np.pi
+res = 512  # Simulation area size (512x512 pixels)
+dashboard_width = 400  # Width for the dashboard area
+
+# Define dashboard heights
+text_dashboard_height = 300  # Height for displaying text information
+average_graph_height = 200   # Height for the average neighbors graph
+cumulative_graph_height = 200  # Height for the cumulative neighbor proportions graph
+
+# Calculate window dimensions
+window_width = res + dashboard_width
+window_height = max(res, text_dashboard_height + average_graph_height + cumulative_graph_height)
+
+# Pygame Initialization
+pygame.init()
+window = pygame.display.set_mode((window_width, window_height))
+pygame.display.set_caption("Bulk Acoustic 2D Continuum Simulation with Density Visualization")
+clock = pygame.time.Clock()
+
+# Simulation Parameters
+paused = False
+running = True  # Flag to control the main loop
+
+# Grid Parameters
+grid_size = 256  # Grid size for better resolution
+dx = 1.0 / grid_size  # Spatial resolution
+dt = 1e-6  # Time step (Reduced for stability)
+
+# Initialize fields
+rho = np.ones((grid_size, grid_size), dtype=np.float32)  # Density field
+vx = np.zeros((grid_size, grid_size), dtype=np.float32)  # Velocity field in x
+vy = np.zeros((grid_size, grid_size), dtype=np.float32)  # Velocity field in y
+
+# Acoustic properties
+po = 1e7  # Acoustic pressure
+ax = np.array([1.0])  # Amplitude in x-direction
+ay = np.array([1.0])  # Amplitude in y-direction
+kx = np.array([1], dtype=int)  # Wave number in x-direction
+ky = np.array([1], dtype=int)  # Wave number in y-direction
+
+# Drag properties
+gamma = 1e3  # Drag coefficient (Adjusted for stability)
+
+# Pressure constant
+K = 1e5  # Pressure constant (Adjust as needed for stability)
+
+# Diffusion coefficient
+D = 1e-4  # Diffusion coefficient for density smoothing
+
+# For tracking simulation metrics
+average_density_over_time = []  # Track average density over time
+time_step = 0  # Tracks the current time step
+
+# Font for text
+pygame.font.init()
+font = pygame.font.SysFont('Arial', 16)
+
+# Define dashboard areas
+text_area_rect = pygame.Rect(res, 0, dashboard_width, text_dashboard_height)
+average_graph_rect = pygame.Rect(res, text_dashboard_height, dashboard_width, average_graph_height)
+cumulative_graph_rect = pygame.Rect(res, text_dashboard_height + average_graph_height, dashboard_width, cumulative_graph_height)
+
+# Initialize key press tracking variables
+key_press_data = []  # List of tuples: (time_step, key_name)
+xchanging = True  # Flag to indicate whether changing kx or ky
+message = "Changing number of nodes along X-axis"
+
+# Initialize acoustic force fields
+def compute_acoustic_force():
+    x = np.linspace(0, 1, grid_size, endpoint=False)
+    y = np.linspace(0, 1, grid_size, endpoint=False)
+    X, Y = np.meshgrid(x, y, indexing='ij')
+
+    f_acoustic_x = np.zeros_like(X)
+    f_acoustic_y = np.zeros_like(Y)
+
+    for wave in range(len(kx)):
+        f_acoustic_x += ax[wave] * np.sin(2 * PI * kx[wave] * X)
+    for wave in range(len(ky)):
+        f_acoustic_y += ay[wave] * np.sin(2 * PI * ky[wave] * Y)
+
+    f_acoustic_x *= po
+    f_acoustic_y *= po
+
+    return f_acoustic_x, f_acoustic_y
+
+# Initialize the simulation
+def initialize():
+    global rho, vx, vy
+    # Small random perturbations in density to initiate movement
+    rho = np.ones((grid_size, grid_size), dtype=np.float32) + 0.01 * (np.random.rand(grid_size, grid_size) - 0.5).astype(np.float32)
+    vx.fill(0.0)
+    vy.fill(0.0)
+
+initialize()
+
+# Process key presses to control simulation parameters
+def process_key_press(key):
+    global xchanging, message, kx, ky, paused, running, key_press_data
+    if key == pygame.K_ESCAPE:
+        running = False
+    elif key == pygame.K_r:
+        initialize()
+    elif key == pygame.K_SPACE:
+        paused = not paused
+    elif key in [pygame.K_0, pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8, pygame.K_9]:
+        val = int(pygame.key.name(key))
+        if xchanging:
+            kx[0] = val
+        else:
+            ky[0] = val
+        # Record key press data
+        key_name = pygame.key.name(key)
+        key_press_data.append((time_step, key_name))
+    elif key == pygame.K_x:
+        xchanging = True
+        message = "Changing number of nodes along X-axis"
+        key_press_data.append((time_step, 'x'))
+    elif key == pygame.K_y:
+        xchanging = False
+        message = "Changing number of nodes along Y-axis"
+        key_press_data.append((time_step, 'y'))
+
+# Update the simulation
+def update():
+    global vx, vy, rho
+
+    # Compute acoustic force
+    f_acoustic_x, f_acoustic_y = compute_acoustic_force()
+
+    # Compute gradients of rho
+    rho_pad = np.pad(rho, ((1, 1), (1, 1)), mode='edge')
+    grad_rho_x = (rho_pad[2:, 1:-1] - rho_pad[:-2, 1:-1]) / (2 * dx)
+    grad_rho_y = (rho_pad[1:-1, 2:] - rho_pad[1:-1, :-2]) / (2 * dx)
+
+    # Compute pressure gradient force
+    force_pressure_x = - (K / rho) * grad_rho_x
+    force_pressure_y = - (K / rho) * grad_rho_y
+
+    # Update velocity fields with acoustic, drag, and pressure gradient forces
+    vx += dt * (-gamma * vx + f_acoustic_x / rho + force_pressure_x)
+    vy += dt * (-gamma * vy + f_acoustic_y / rho + force_pressure_y)
+
+    # Apply boundary conditions (reflective boundaries)
+    vx[0, :] = 0
+    vx[-1, :] = 0
+    vx[:, 0] = 0
+    vx[:, -1] = 0
+
+    vy[0, :] = 0
+    vy[-1, :] = 0
+    vy[:, 0] = 0
+    vy[:, -1] = 0
+
+    # Update density field using the continuity equation with diffusion
+    rho_pad = np.pad(rho, ((1, 1), (1, 1)), mode='edge')
+    vx_pad = np.pad(vx, ((1, 1), (1, 1)), mode='edge')
+    vy_pad = np.pad(vy, ((1, 1), (1, 1)), mode='edge')
+
+    # Compute divergence of (rho * v)
+    flux_x = (rho_pad[1:-1, 1:-1] * vx_pad[1:-1, 1:-1] - rho_pad[:-2, 1:-1] * vx_pad[:-2, 1:-1]) / dx
+    flux_y = (rho_pad[1:-1, 1:-1] * vy_pad[1:-1, 1:-1] - rho_pad[1:-1, :-2] * vy_pad[1:-1, :-2]) / dx
+    div_rho_v = flux_x + flux_y
+
+    # Compute Laplacian of rho for diffusion
+    laplacian_rho = (rho_pad[:-2, 1:-1] + rho_pad[2:, 1:-1] + rho_pad[1:-1, :-2] + rho_pad[1:-1, 2:] - 4 * rho_pad[1:-1, 1:-1]) / dx**2
+
+    # Update rho
+    rho += dt * (-div_rho_v + D * laplacian_rho)
+
+    # Prevent negative densities and excessively high densities
+    rho[:] = np.clip(rho, 1e-2, 5.0)
+
+# Render the simulation
+def render_simulation():
+    # Process events
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            global running
+            running = False
+        elif event.type == pygame.KEYDOWN:
+            process_key_press(event.key)
+
+    # Clear the screen
+    window.fill((17, 47, 65))  # Dark background
+
+    # Draw pressure minima lines
+    lines = []
+    if kx[0] > 0:
+        for x_line in np.linspace(.5 / kx[0], 1 - .5 / kx[0], kx[0]):
+            start_pos = (int(x_line * res), 0)
+            end_pos = (int(x_line * res), res)
+            lines.append((start_pos, end_pos))
+
+    if ky[0] > 0:
+        for y_line in np.linspace(.5 / ky[0], 1 - .5 / ky[0], ky[0]):
+            start_pos = (0, int(y_line * res))
+            end_pos = (res, int(y_line * res))
+            lines.append((start_pos, end_pos))
+
+    for line in lines:
+        pygame.draw.line(window, (128, 128, 128), line[0], line[1], 1)  # Gray lines
+
+    # Normalize the density field for visualization
+    density_min = rho.min()
+    density_max = rho.max()
+    if density_max - density_min == 0:
+        density_max = density_min + 1e-8
+    density_normalized = (rho - density_min) / (density_max - density_min)
+    density_surface = (density_normalized * 255).astype(np.uint8)
+
+    # Create a color map for density using a colormap (e.g., viridis)
+    import matplotlib.pyplot as plt
+    cmap = plt.get_cmap('viridis')
+    density_color = cmap(density_normalized)
+    density_color = (density_color[:, :, :3] * 255).astype(np.uint8)
+
+    # Transpose the array to match Pygame's coordinate system
+    density_color = np.transpose(density_color, (1, 0, 2))
+
+    # Create a pygame surface from the density field
+    density_surface = pygame.surfarray.make_surface(density_color)
+    density_surface = pygame.transform.scale(density_surface, (res, res))
+
+    # Display the surface
+    window.blit(density_surface, (0, 0))
+
+    # Draw Text Dashboard
+    pygame.draw.rect(window, (30, 30, 30), text_area_rect)  # Background for text area
+
+    # Display messages
+    start_x = text_area_rect.left + 10
+    start_y = text_area_rect.top + 10  # Starting y position for text
+    spacing = 20  # Spacing between lines
+    y_pos = start_y
+
+    # Display messages
+    if y_pos + spacing <= text_area_rect.bottom:
+        message_surface = font.render(message, True, (255, 255, 255))
+        window.blit(message_surface, (start_x, y_pos))
+        y_pos += spacing
+
+    # Display average density
+    avg_density = np.mean(rho)
+    if y_pos + spacing <= text_area_rect.bottom:
+        avg_density_surface = font.render(f"Average Density: {avg_density:.6f}", True, (255, 255, 255))
+        window.blit(avg_density_surface, (start_x, y_pos))
+        y_pos += spacing
+
+    pygame.display.flip()
+
+# Main simulation loop
+while running:
+    if not paused:
+        update()
+
+        # Compute average density for metrics
+        avg_density = np.mean(rho)
+        average_density_over_time.append(avg_density)
+
+        time_step += 1  # Increment the time step after each simulation step
+
+    # Render the simulation
+    render_simulation()
+
+    clock.tick(60)  # Limit to 60 FPS
+
+# Clean up and exit
+pygame.quit()
+sys.exit()
